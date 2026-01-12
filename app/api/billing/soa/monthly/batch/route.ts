@@ -3,6 +3,7 @@ import { headers } from "next/headers"
 import { requireAuth } from "@/lib/auth"
 import prisma from "@/lib/prisma"
 import { format } from "date-fns"
+import { calculateWaterBill } from "@/lib/calculations/water"
 
 // Natural sort function for unit numbers (M2-2F-1, M2-2F-2, ... M2-2F-10, M2-2F-11)
 function naturalSort(a: string, b: string): number {
@@ -81,7 +82,38 @@ export async function GET(request: NextRequest) {
     const units = unitsUnsorted.sort((a, b) => naturalSort(a.unitNumber, b.unitNumber))
 
     const electricRate = Number(tenant.settings.electricRate)
+    const electricMinCharge = Number(tenant.settings.electricMinCharge || 50)
     const duesRate = Number(tenant.settings.associationDuesRate)
+
+    // Water tier settings for calculating water bills
+    const waterSettings = {
+      waterResTier1Max: Number(tenant.settings.waterResTier1Max),
+      waterResTier1Rate: Number(tenant.settings.waterResTier1Rate),
+      waterResTier2Max: Number(tenant.settings.waterResTier2Max),
+      waterResTier2Rate: Number(tenant.settings.waterResTier2Rate),
+      waterResTier3Max: Number(tenant.settings.waterResTier3Max),
+      waterResTier3Rate: Number(tenant.settings.waterResTier3Rate),
+      waterResTier4Max: Number(tenant.settings.waterResTier4Max),
+      waterResTier4Rate: Number(tenant.settings.waterResTier4Rate),
+      waterResTier5Max: Number(tenant.settings.waterResTier5Max),
+      waterResTier5Rate: Number(tenant.settings.waterResTier5Rate),
+      waterResTier6Max: Number(tenant.settings.waterResTier6Max),
+      waterResTier6Rate: Number(tenant.settings.waterResTier6Rate),
+      waterResTier7Rate: Number(tenant.settings.waterResTier7Rate),
+      waterComTier1Max: Number(tenant.settings.waterComTier1Max),
+      waterComTier1Rate: Number(tenant.settings.waterComTier1Rate),
+      waterComTier2Max: Number(tenant.settings.waterComTier2Max),
+      waterComTier2Rate: Number(tenant.settings.waterComTier2Rate),
+      waterComTier3Max: Number(tenant.settings.waterComTier3Max),
+      waterComTier3Rate: Number(tenant.settings.waterComTier3Rate),
+      waterComTier4Max: Number(tenant.settings.waterComTier4Max),
+      waterComTier4Rate: Number(tenant.settings.waterComTier4Rate),
+      waterComTier5Max: Number(tenant.settings.waterComTier5Max),
+      waterComTier5Rate: Number(tenant.settings.waterComTier5Rate),
+      waterComTier6Max: Number(tenant.settings.waterComTier6Max),
+      waterComTier6Rate: Number(tenant.settings.waterComTier6Rate),
+      waterComTier7Rate: Number(tenant.settings.waterComTier7Rate),
+    }
 
     // Previous month for payments
     const prevMonthStart = new Date(Date.UTC(year, month - 2, 1))
@@ -150,19 +182,53 @@ export async function GET(request: NextRequest) {
         where: { unitId: unit.id }
       })
 
-      // Calculate current charges - use bill data if exists, otherwise calculate
-      const electricAmount = currentBill ? Number(currentBill.electricAmount) : 0
-      const waterAmount = currentBill ? Number(currentBill.waterAmount) : 0
-      const duesAmount = currentBill ? Number(currentBill.associationDues) : Number(unit.area) * duesRate
-      const parkingAmount = currentBill ? Number(currentBill.parkingFee) : Number(unit.parkingArea || 0) * duesRate
-      const spAssessment = currentBill ? Number(currentBill.spAssessment) : 0
+      // Calculate current charges - use bill data if exists, otherwise calculate from readings
+      let electricAmount = 0
+      let waterAmount = 0
+      let duesAmount = Number(unit.area) * duesRate
+      let parkingAmount = Number(unit.parkingArea || 0) * duesRate
+      let spAssessment = 0
+
+      if (currentBill) {
+        // Use bill data
+        electricAmount = Number(currentBill.electricAmount)
+        waterAmount = Number(currentBill.waterAmount)
+        duesAmount = Number(currentBill.associationDues) || duesAmount
+        parkingAmount = Number(currentBill.parkingFee) || parkingAmount
+        spAssessment = Number(currentBill.spAssessment) || 0
+      } else {
+        // Calculate from readings when no bill exists
+        const electricCons = electricReading ? Number(electricReading.consumption) : 0
+        const waterCons = waterReading ? Number(waterReading.consumption) : 0
+
+        // Electric: consumption × rate, with minimum charge
+        const calculatedElectric = electricCons * electricRate
+        electricAmount = calculatedElectric < electricMinCharge && electricCons > 0 ? electricMinCharge : calculatedElectric
+
+        // Water: use tiered calculation
+        waterAmount = calculateWaterBill(
+          waterCons,
+          (unit.unitType as 'RESIDENTIAL' | 'COMMERCIAL') || 'RESIDENTIAL',
+          waterSettings
+        )
+      }
 
       // Calculate total from individual amounts (NOT from bill.totalAmount which might be wrong)
       const calculatedTotal = electricAmount + waterAmount + duesAmount + parkingAmount + spAssessment
 
+      // Calculate period string - use bill dates if available, otherwise use standard billing period
+      // Standard: 27th of prev month to 26th of current month
+      const periodStart = currentBill?.billingPeriodStart
+        ? format(currentBill.billingPeriodStart, "M-d")
+        : `10-27`  // Default start date for November billing
+      const periodEnd = currentBill?.billingPeriodEnd
+        ? format(currentBill.billingPeriodEnd, "M-d")
+        : `11-26`  // Default end date for November billing
+      const periodString = `${periodStart} TO ${periodEnd}`
+
       const currentCharges = {
         electric: {
-          period: currentBill ? `${format(currentBill.billingPeriodStart, "M-d")} TO ${format(currentBill.billingPeriodEnd, "M-d")}` : "",
+          period: periodString,
           presentReading: electricReading ? Number(electricReading.presentReading) : 0,
           previousReading: electricReading ? Number(electricReading.previousReading) : 0,
           consumption: electricReading ? Number(electricReading.consumption) : 0,
@@ -170,7 +236,7 @@ export async function GET(request: NextRequest) {
           amount: electricAmount
         },
         water: {
-          period: currentBill ? `${format(currentBill.billingPeriodStart, "M-d")} TO ${format(currentBill.billingPeriodEnd, "M-d")}` : "",
+          period: periodString,
           presentReading: waterReading ? Number(waterReading.presentReading) : 0,
           previousReading: waterReading ? Number(waterReading.previousReading) : 0,
           consumption: waterReading ? Number(waterReading.consumption) : 0,
