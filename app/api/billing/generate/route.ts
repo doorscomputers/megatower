@@ -46,7 +46,7 @@ export async function POST(request: NextRequest) {
     const { tenantId } = await requireAuth(await headers())
 
     const body = await request.json()
-    const { billingMonth, preview = true } = body
+    const { billingMonth, preview = true, regenerate = false } = body
 
     if (!billingMonth) {
       return NextResponse.json(
@@ -475,7 +475,20 @@ export async function POST(request: NextRequest) {
       })
 
       if (existingBills.length > 0) {
-        throw new Error(`Bills already exist for ${billingMonth}. Found ${existingBills.length} existing bill(s).`)
+        if (regenerate) {
+          // Delete existing bills for regeneration
+          // Note: This only deletes REGULAR bills, not OPENING_BALANCE bills
+          await tx.bill.deleteMany({
+            where: {
+              tenantId,
+              billingMonth: billingPeriod,
+              billType: { not: "OPENING_BALANCE" },
+            },
+          })
+          console.log(`Deleted ${existingBills.length} existing bills for regeneration`)
+        } else {
+          throw new Error(`Bills already exist for ${billingMonth}. Found ${existingBills.length} existing bill(s). Use regenerate option to replace them.`)
+        }
       }
 
       // Generate bill numbers
