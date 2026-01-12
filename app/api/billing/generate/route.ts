@@ -281,13 +281,12 @@ export async function POST(request: NextRequest) {
         previousBalance += unpaidBalance
 
         // Calculate months overdue based on billing month difference
-        // Bill is due the month AFTER billing, so 1st month past due = current - (bill + 1)
-        // September bill due in October. November SOA = 1st month past due (grace)
-        // December SOA = 2nd month past due (interest applies)
+        // November bill unpaid in December = 1 month overdue (gets 10% penalty)
+        // November bill unpaid in January = 2 months overdue (compound penalty)
         const billMonth = prevBill.billingMonth
         const currentMonth = billingPeriod
         const monthsOverdue = (currentMonth.getFullYear() - billMonth.getFullYear()) * 12 +
-                             (currentMonth.getMonth() - billMonth.getMonth()) - 1
+                             (currentMonth.getMonth() - billMonth.getMonth())
 
         // Calculate unpaid principal (bill total minus any penalty already included)
         const billPrincipal = Number(prevBill.totalAmount) - Number(prevBill.penaltyAmount)
@@ -297,9 +296,9 @@ export async function POST(request: NextRequest) {
         const unpaidPrincipal = billPrincipal * unpaidRatio
 
         // Apply interest based on months overdue
-        // 1st month overdue = grace period (no interest)
-        // 2nd month+ = interest applies
-        if (monthsOverdue >= 2 && unpaidPrincipal > 0) {
+        // 1st month overdue = 10% penalty (matches Excel "1st MONTH" column)
+        // 2nd month+ = compound penalty
+        if (monthsOverdue >= 1 && unpaidPrincipal > 0) {
           if (interestAppliedCount === 0) {
             // First bill getting interest: simple 10%
             cumulativeInterest = unpaidPrincipal * penaltyRate
