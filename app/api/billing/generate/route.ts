@@ -288,12 +288,35 @@ export async function POST(request: NextRequest) {
         const monthsOverdue = (currentMonth.getFullYear() - billMonth.getFullYear()) * 12 +
                              (currentMonth.getMonth() - billMonth.getMonth())
 
+        // For OPENING_BALANCE bills, exclude migrated debt from penalty calculation
+        // Migrated debt = bill total - current charges (electric + water + dues + parking)
+        // Only apply penalty to unpaid CURRENT charges, not migrated debt
+        let penaltyEligibleBalance = unpaidBalance
+
+        if (prevBill.billType === 'OPENING_BALANCE') {
+          // Calculate current charges from the bill
+          // If duesAmount not stored, calculate from unit area × rate
+          const duesRate = Number(tenant.settings.associationDuesRate)
+          const calculatedDues = prevBill.duesAmount ? Number(prevBill.duesAmount) : (Number(unit.area) * duesRate)
+          const calculatedParking = prevBill.parkingFee ? Number(prevBill.parkingFee) : (Number(unit.parkingArea || 0) * duesRate)
+
+          const currentCharges = Number(prevBill.electricAmount || 0) +
+                                 Number(prevBill.waterAmount || 0) +
+                                 calculatedDues +
+                                 calculatedParking
+          const migratedDebt = Math.max(0, Number(prevBill.totalAmount) - currentCharges)
+
+          // If balance is entirely migrated debt, no penalty
+          // If balance includes some current charges, only penalize that portion
+          penaltyEligibleBalance = Math.max(0, unpaidBalance - migratedDebt)
+        }
+
         // Calculate unpaid principal (bill total minus any penalty already included)
         const billPrincipal = Number(prevBill.totalAmount) - Number(prevBill.penaltyAmount)
         const paidAmount = Number(prevBill.paidAmount)
         const totalWithPenalty = Number(prevBill.totalAmount)
         const unpaidRatio = totalWithPenalty > 0 ? Math.max(0, totalWithPenalty - paidAmount) / totalWithPenalty : 1
-        const unpaidPrincipal = billPrincipal * unpaidRatio
+        const unpaidPrincipal = penaltyEligibleBalance > 0 ? penaltyEligibleBalance : 0
 
         // Apply interest based on months overdue
         // 1st month overdue = 10% penalty (matches Excel "1st MONTH" column)

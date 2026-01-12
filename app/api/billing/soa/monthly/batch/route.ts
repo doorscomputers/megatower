@@ -194,9 +194,28 @@ export async function GET(request: NextRequest) {
       const pastDues = pastDueBills.map((bill, index) => {
         const balance = Number(bill.totalAmount) - Number(bill.paidAmount)
         const monthsOverdue = index + 1
-        const penalty1 = monthsOverdue >= 1 ? balance * 0.10 : 0
-        const penalty2 = monthsOverdue >= 2 ? (balance + penalty1) * 0.10 : 0
-        const penalty3 = monthsOverdue >= 3 ? (balance + penalty1 + penalty2) * 0.10 : 0
+
+        // For OPENING_BALANCE bills, exclude migrated debt from penalty calculation
+        // Migrated debt = bill total - current charges (electric + water + dues + parking)
+        let penaltyEligibleBalance = balance
+
+        if (bill.billType === 'OPENING_BALANCE') {
+          // If duesAmount not stored, calculate from unit area × rate
+          const calculatedDues = bill.duesAmount ? Number(bill.duesAmount) : (Number(unit.area) * duesRate)
+          const calculatedParking = bill.parkingFee ? Number(bill.parkingFee) : (Number(unit.parkingArea || 0) * duesRate)
+
+          const billCurrentCharges = Number(bill.electricAmount || 0) +
+                                     Number(bill.waterAmount || 0) +
+                                     calculatedDues +
+                                     calculatedParking
+          const migratedDebt = Math.max(0, Number(bill.totalAmount) - billCurrentCharges)
+          // Only apply penalty to unpaid current charges, not migrated debt
+          penaltyEligibleBalance = Math.max(0, balance - migratedDebt)
+        }
+
+        const penalty1 = monthsOverdue >= 1 ? penaltyEligibleBalance * 0.10 : 0
+        const penalty2 = monthsOverdue >= 2 ? (penaltyEligibleBalance + penalty1) * 0.10 : 0
+        const penalty3 = monthsOverdue >= 3 ? (penaltyEligibleBalance + penalty1 + penalty2) * 0.10 : 0
 
         return {
           month: format(bill.billingMonth, "MMM yyyy"),
