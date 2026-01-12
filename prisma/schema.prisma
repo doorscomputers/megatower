@@ -1,0 +1,884 @@
+// This is your Prisma schema file
+// Learn more: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================
+// TENANT & USER MANAGEMENT
+// ============================================
+
+model Tenant {
+  id          String   @id @default(cuid())
+  name        String   // "Mega Tower Residences"
+  address     String?
+  phone       String?
+  email       String?
+
+  // Settings
+  isActive    Boolean  @default(true)
+
+  // Relations
+  users       User[]
+  units       Unit[]
+  owners      Owner[]
+  bills       Bill[]
+  payments    Payment[]
+  settings    TenantSettings?
+  billingChecklists BillingChecklist[]
+  soaBatches  SOABatch[]
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+model User {
+  id            String    @id @default(cuid())
+  tenantId      String?
+  tenant        Tenant?   @relation(fields: [tenantId], references: [id])
+
+  email         String    @unique
+  username      String?   @unique  // Username for login (normalized lowercase)
+  displayUsername String?          // Original username with casing preserved
+  password      String
+  role          UserRole
+
+  // Profile
+  firstName     String
+  lastName      String
+  phoneNumber   String?
+
+  // Link to owner (if UNIT_OWNER role)
+  ownerId       String?   @unique
+  owner         Owner?    @relation(fields: [ownerId], references: [id])
+
+  isActive      Boolean   @default(true)
+
+  // Menu permissions (user-specific overrides)
+  menuPermissions MenuPermission[]
+
+  // Better Auth relations
+  sessions      Session[]
+  accounts      Account[]
+  members       Member[]
+
+  // Audit
+  createdBy     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastLoginAt   DateTime?
+
+  @@index([tenantId])
+  @@index([email])
+  @@index([role])
+}
+
+enum UserRole {
+  SUPER_ADMIN    // Programmer - full access, can edit water tiers
+  ADMIN          // Can edit rates, configure permissions
+  MANAGER        // View reports, approve payments
+  ACCOUNTANT     // Full billing cycle
+  BOOKKEEPER     // Enter payments
+  CLERK          // Enter readings only
+  UNIT_OWNER     // View own bills only
+}
+
+// Dynamic roles table for custom roles
+model Role {
+  id          String   @id @default(cuid())
+  name        String   @unique  // "ADMIN", "MANAGER", etc.
+  label       String   // "Admin", "Manager" - display name
+  description String?
+  color       String   @default("bg-gray-600") // Badge color
+  isSystem    Boolean  @default(false) // System roles cannot be deleted
+  isActive    Boolean  @default(true)
+  order       Int      @default(0)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+// ============================================
+// OWNER & UNIT MANAGEMENT
+// ============================================
+
+model Owner {
+  id          String   @id @default(cuid())
+  tenantId    String
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  // Owner details
+  lastName    String
+  firstName   String
+  middleName  String?
+  email       String?
+  phone       String?
+  address     String?
+  
+  // Login (if they have portal access)
+  user        User?
+  
+  // Relations
+  units       Unit[]   // One owner can have MULTIPLE units
+  
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  @@index([tenantId])
+}
+
+model Unit {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+
+  // Unit identification
+  unitNumber      String   // "2F-1", "GF-5", etc. (unique per tenant via @@unique below)
+  floorLevel      String             // "GF", "2F", "3F", etc.
+  area            Decimal  @db.Decimal(10, 2)
+  parkingArea     Decimal  @default(0) @db.Decimal(10, 2)  // Separate parking area for billing
+  unitType        UnitType           // RESIDENTIAL or COMMERCIAL
+  
+  // Ownership (optional - unit can be unassigned)
+  ownerId         String?
+  owner           Owner?   @relation(fields: [ownerId], references: [id])
+  
+  // Status
+  isActive        Boolean  @default(true)
+  occupancyStatus OccupancyStatus @default(OCCUPIED)
+
+  // Relations
+  electricReadings   ElectricReading[]
+  waterReadings      WaterReading[]
+  bills              Bill[]
+  payments           Payment[]
+  advanceBalance     UnitAdvanceBalance?
+  soaDocuments       SOADocument[]
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, unitNumber])
+  @@index([tenantId])
+  @@index([ownerId])
+  @@index([floorLevel])
+  @@index([unitType])
+}
+
+enum UnitType {
+  RESIDENTIAL
+  COMMERCIAL
+}
+
+enum OccupancyStatus {
+  OCCUPIED
+  VACANT
+  OWNER_OCCUPIED
+  RENTED
+}
+
+// ============================================
+// METER READINGS
+// ============================================
+
+model ElectricReading {
+  id              String   @id @default(cuid())
+  unitId          String
+  unit            Unit     @relation(fields: [unitId], references: [id])
+  
+  readingDate     DateTime
+  billingPeriod   DateTime // Month this reading is for
+  previousReading Decimal  @db.Decimal(10, 2)
+  presentReading  Decimal  @db.Decimal(10, 2)
+  consumption     Decimal  @db.Decimal(10, 2)
+  
+  // Metadata
+  readBy          String?  // User who recorded reading
+  remarks         String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([unitId])
+  @@index([billingPeriod])
+  @@unique([unitId, billingPeriod])
+}
+
+model WaterReading {
+  id              String   @id @default(cuid())
+  unitId          String
+  unit            Unit     @relation(fields: [unitId], references: [id])
+  
+  readingDate     DateTime
+  billingPeriod   DateTime
+  previousReading Decimal  @db.Decimal(10, 2)
+  presentReading  Decimal  @db.Decimal(10, 2)
+  consumption     Decimal  @db.Decimal(10, 2)
+  
+  // Metadata
+  readBy          String?
+  remarks         String?
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([unitId])
+  @@index([billingPeriod])
+  @@unique([unitId, billingPeriod])
+}
+
+// ============================================
+// BILLING
+// ============================================
+
+model Bill {
+  id                  String   @id @default(cuid())
+  tenantId            String
+  tenant              Tenant   @relation(fields: [tenantId], references: [id])
+  unitId              String
+  unit                Unit     @relation(fields: [unitId], references: [id])
+  
+  // Bill identification
+  billNumber          String   @unique // Auto-generated
+  billingMonth        DateTime // Nov 2025
+  billingPeriodStart  DateTime // Sep 27
+  billingPeriodEnd    DateTime // Oct 26
+  statementDate       DateTime // Nov 5
+  dueDate             DateTime // Nov 15
+  
+  // Amounts
+  electricAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  waterAmount         Decimal  @default(0) @db.Decimal(10, 2)
+  associationDues     Decimal  @default(0) @db.Decimal(10, 2)
+  penaltyAmount       Decimal  @default(0) @db.Decimal(10, 2)
+  otherCharges        Decimal  @default(0) @db.Decimal(10, 2)
+
+  // Additional charges and deductions
+  spAssessment        Decimal  @default(0) @db.Decimal(10, 2)  // SP Assessment/Insurance
+  parkingFee          Decimal  @default(0) @db.Decimal(10, 2)  // Parking charges
+  discounts           Decimal  @default(0) @db.Decimal(10, 2)  // Deductions from bill
+  advanceDuesApplied  Decimal  @default(0) @db.Decimal(10, 2)  // Advance dues deducted
+  advanceUtilApplied  Decimal  @default(0) @db.Decimal(10, 2)  // Advance utilities deducted
+
+  totalAmount         Decimal  @db.Decimal(10, 2)
+  paidAmount          Decimal  @default(0) @db.Decimal(10, 2)
+  balance             Decimal  @db.Decimal(10, 2)
+  
+  // Status
+  status              BillStatus @default(UNPAID)
+  billType            BillType   @default(REGULAR)
+
+  // Relations
+  payments            BillPayment[]
+  penalties           Penalty[]
+  soaDocuments        SOADocument[]
+
+  // Locking (prevents modification after SOA distribution)
+  isLocked            Boolean  @default(false)
+  lockedAt            DateTime?
+  lockedBy            String?
+
+  // Metadata
+  generatedBy         String?
+  remarks             String?
+  
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+  
+  @@index([tenantId])
+  @@index([unitId])
+  @@index([billingMonth])
+  @@index([status])
+  @@index([dueDate])
+}
+
+enum BillStatus {
+  UNPAID
+  PARTIAL
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum BillType {
+  REGULAR
+  OPENING_BALANCE
+}
+
+model Penalty {
+  id              String   @id @default(cuid())
+  billId          String
+  bill            Bill     @relation(fields: [billId], references: [id])
+  
+  penaltyMonth    DateTime
+  monthsOverdue   Int
+  baseAmount      Decimal  @db.Decimal(10, 2)
+  penaltyRate     Decimal  @db.Decimal(5, 4) // 0.1000 = 10%
+  penaltyAmount   Decimal  @db.Decimal(10, 2)
+  
+  createdAt       DateTime @default(now())
+  
+  @@index([billId])
+  @@index([penaltyMonth])
+}
+
+// ============================================
+// PAYMENTS
+// ============================================
+
+model Payment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  unitId          String
+  unit            Unit     @relation(fields: [unitId], references: [id])
+
+  // Payment identification
+  // OR# is unique per tenant, not globally (allows same format across buildings)
+  orNumber        String?  // Official Receipt
+  arNumber        String?  // Acknowledgement Receipt
+  paymentDate     DateTime
+
+  // Component amounts on THIS receipt
+  electricAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  waterAmount         Decimal  @default(0) @db.Decimal(10, 2)
+  duesAmount          Decimal  @default(0) @db.Decimal(10, 2)  // Association Dues
+  pastDuesAmount      Decimal  @default(0) @db.Decimal(10, 2)  // Past Dues / Penalty
+  spAssessmentAmount  Decimal  @default(0) @db.Decimal(10, 2)  // SP Assessment
+  advanceDuesAmount   Decimal  @default(0) @db.Decimal(10, 2)  // Advance for Dues
+  advanceUtilAmount   Decimal  @default(0) @db.Decimal(10, 2)  // Advance for Utilities
+  otherAdvanceAmount  Decimal  @default(0) @db.Decimal(10, 2)  // Other Advanced (general excess)
+
+  // Total (sum of all component amounts)
+  totalAmount         Decimal  @db.Decimal(10, 2)
+
+  // Payment details
+  paymentMethod   PaymentMethod
+  referenceNumber String?
+  checkNumber     String?
+  checkDate       DateTime?
+  bankName        String?
+
+  // Allocation
+  billPayments    BillPayment[]
+
+  // Status
+  status          PaymentStatus @default(CONFIRMED)
+
+  // Metadata
+  receivedBy      String?
+  remarks         String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, orNumber]) // OR# unique within each tenant
+  @@index([tenantId])
+  @@index([unitId])
+  @@index([paymentDate])
+  @@index([status])
+  @@index([orNumber])
+}
+
+enum PaymentMethod {
+  CASH
+  CHECK
+  BANK_TRANSFER
+  GCASH
+  PAYMAYA
+  CREDIT_CARD
+  DEBIT_CARD
+}
+
+enum PaymentStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+}
+
+model BillPayment {
+  id              String   @id @default(cuid())
+  paymentId       String
+  payment         Payment  @relation(fields: [paymentId], references: [id])
+  billId          String
+  bill            Bill     @relation(fields: [billId], references: [id])
+
+  // Allocation breakdown
+  electricAmount      Decimal  @default(0) @db.Decimal(10, 2)
+  waterAmount         Decimal  @default(0) @db.Decimal(10, 2)
+  duesAmount          Decimal  @default(0) @db.Decimal(10, 2)
+  penaltyAmount       Decimal  @default(0) @db.Decimal(10, 2)
+  spAssessmentAmount  Decimal  @default(0) @db.Decimal(10, 2)  // SP Assessment payment
+  otherAmount         Decimal  @default(0) @db.Decimal(10, 2)
+
+  totalAmount     Decimal  @db.Decimal(10, 2)
+
+  createdAt       DateTime @default(now())
+
+  @@index([paymentId])
+  @@index([billId])
+}
+
+// ============================================
+// BILLING ADJUSTMENTS (Pre-generation entries)
+// ============================================
+
+model BillingAdjustment {
+  id              String   @id @default(cuid())
+  tenantId        String
+  unitId          String
+  billingPeriod   DateTime // Month this adjustment is for
+
+  // Adjustments (entered before bill generation)
+  spAssessment        Decimal  @default(0) @db.Decimal(10, 2)  // Added to bill
+  discounts           Decimal  @default(0) @db.Decimal(10, 2)  // Deducted from bill
+  advanceDues         Decimal  @default(0) @db.Decimal(10, 2)  // Advance dues to apply
+  advanceUtilities    Decimal  @default(0) @db.Decimal(10, 2)  // Advance utilities to apply
+
+  remarks         String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([tenantId, unitId, billingPeriod])
+  @@index([tenantId])
+  @@index([unitId])
+  @@index([billingPeriod])
+}
+
+// ============================================
+// BILLING CHECKLIST
+// ============================================
+
+model BillingChecklist {
+  id                    String   @id @default(cuid())
+  tenantId              String
+  tenant                Tenant   @relation(fields: [tenantId], references: [id])
+  billingMonth          DateTime
+
+  // Checklist items
+  meterReadingsComplete Boolean  @default(false)
+  paymentsRecorded      Boolean  @default(false)
+  adjustmentsEntered    Boolean  @default(false)
+  billsGenerated        Boolean  @default(false)
+  soaExported           Boolean  @default(false)
+
+  // Metadata
+  completedBy           String?
+  completedAt           DateTime?
+  notes                 String?
+
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  @@unique([tenantId, billingMonth])
+  @@index([tenantId])
+  @@index([billingMonth])
+}
+
+// ============================================
+// ADVANCE BALANCE TRACKING
+// ============================================
+
+model UnitAdvanceBalance {
+  id               String   @id @default(cuid())
+  tenantId         String
+  unitId           String   @unique
+  unit             Unit     @relation(fields: [unitId], references: [id])
+
+  // Advance balances (credited from payments, deducted when generating bills)
+  advanceDues      Decimal  @default(0) @db.Decimal(10, 2)  // Advance for Association Dues
+  advanceUtilities Decimal  @default(0) @db.Decimal(10, 2)  // Advance for Electric/Water
+
+  updatedAt        DateTime @updatedAt
+
+  @@unique([tenantId, unitId])
+  @@index([tenantId])
+  @@index([unitId])
+}
+
+// ============================================
+// SETTINGS & CONFIGURATION
+// ============================================
+
+model TenantSettings {
+  id              String   @id @default(cuid())
+  tenantId        String   @unique
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  
+  // Billing Schedule
+  billingDayOfMonth     Int      @default(27) // Start billing on 27th
+  readingDay            Int      @default(26) // Read meters on 26th
+  statementDelay        Int      @default(10) // Days after reading
+  dueDateDelay          Int      @default(10) // Days after statement
+  gracePeriodDays       Int      @default(0)
+  
+  // Rates (ADMIN can edit these)
+  electricRate          Decimal  @default(8.39) @db.Decimal(10, 2)
+  electricMinCharge     Decimal  @default(50) @db.Decimal(10, 2)
+  associationDuesRate   Decimal  @default(60) @db.Decimal(10, 2)
+  parkingRate           Decimal  @default(60) @db.Decimal(10, 2)   // Rate per sqm parking
+  penaltyRate           Decimal  @default(0.10) @db.Decimal(5, 4) // 10%
+  
+  // Water Tiers - Residential (SUPER_ADMIN only)
+  // Max values are EXCLUSIVE upper bounds to match Excel formulas
+  // Excel: <=1 → Tier1, >1 AND <6 → Tier2, >5 AND <11 → Tier3, etc.
+  waterResTier1Max      Decimal  @default(1) @db.Decimal(10, 2)   // <=1 cu.m → fixed rate
+  waterResTier1Rate     Decimal  @default(80) @db.Decimal(10, 2)
+  waterResTier2Max      Decimal  @default(6) @db.Decimal(10, 2)   // <6 means 2,3,4,5 cu.m
+  waterResTier2Rate     Decimal  @default(200) @db.Decimal(10, 2)
+  waterResTier3Max      Decimal  @default(11) @db.Decimal(10, 2)  // <11 means 6-10 cu.m
+  waterResTier3Rate     Decimal  @default(370) @db.Decimal(10, 2)
+  waterResTier4Max      Decimal  @default(21) @db.Decimal(10, 2)  // <21 means 11-20 cu.m
+  waterResTier4Rate     Decimal  @default(40) @db.Decimal(10, 2)
+  waterResTier5Max      Decimal  @default(31) @db.Decimal(10, 2)  // <31 means 21-30 cu.m
+  waterResTier5Rate     Decimal  @default(45) @db.Decimal(10, 2)
+  waterResTier6Max      Decimal  @default(41) @db.Decimal(10, 2)  // <41 means 31-40 cu.m
+  waterResTier6Rate     Decimal  @default(50) @db.Decimal(10, 2)
+  waterResTier7Rate     Decimal  @default(55) @db.Decimal(10, 2)  // >40 cu.m
+
+  // Water Tiers - Commercial (SUPER_ADMIN only)
+  // Same boundary logic as Residential
+  waterComTier1Max      Decimal  @default(1) @db.Decimal(10, 2)   // <=1 cu.m → fixed rate
+  waterComTier1Rate     Decimal  @default(200) @db.Decimal(10, 2)
+  waterComTier2Max      Decimal  @default(6) @db.Decimal(10, 2)   // <6 means 2,3,4,5 cu.m
+  waterComTier2Rate     Decimal  @default(250) @db.Decimal(10, 2)
+  waterComTier3Max      Decimal  @default(11) @db.Decimal(10, 2)  // <11 means 6-10 cu.m
+  waterComTier3Rate     Decimal  @default(740) @db.Decimal(10, 2)
+  waterComTier4Max      Decimal  @default(21) @db.Decimal(10, 2)  // <21 means 11-20 cu.m
+  waterComTier4Rate     Decimal  @default(55) @db.Decimal(10, 2)
+  waterComTier5Max      Decimal  @default(31) @db.Decimal(10, 2)  // <31 means 21-30 cu.m
+  waterComTier5Rate     Decimal  @default(60) @db.Decimal(10, 2)
+  waterComTier6Max      Decimal  @default(41) @db.Decimal(10, 2)  // <41 means 31-40 cu.m
+  waterComTier6Rate     Decimal  @default(65) @db.Decimal(10, 2)
+  waterComTier7Rate     Decimal  @default(85) @db.Decimal(10, 2)  // >40 cu.m
+  
+  // Payment Settings
+  paymentAllocationStrategy String @default("OLDEST_FIRST") // OLDEST_FIRST or NEWEST_FIRST
+
+  // SOA Settings
+  soaDetailMonths       Int      @default(4) // Show last 4 months in detail
+
+  // Custom Floors (JSON array of floor names)
+  customFloors          String[] @default([])
+
+  // SP Assessment (Insurance) rate - flat amount per enrolled unit
+  spAssessmentRate      Decimal  @default(0) @db.Decimal(10, 2)
+
+  updatedAt             DateTime @updatedAt
+}
+
+// ============================================
+// MENU & PERMISSIONS
+// ============================================
+
+model Menu {
+  id              String   @id @default(cuid())
+  name            String   @unique
+  label           String
+  icon            String?
+  path            String?
+  parentId        String?
+  parent          Menu?    @relation("MenuHierarchy", fields: [parentId], references: [id])
+  children        Menu[]   @relation("MenuHierarchy")
+  order           Int      @default(0)
+  isActive        Boolean  @default(true)
+  
+  // Default permissions per role
+  rolePermissions RolePermission[]
+  
+  // User-specific overrides
+  userPermissions MenuPermission[]
+  
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  
+  @@index([parentId])
+  @@index([order])
+}
+
+model RolePermission {
+  id              String   @id @default(cuid())
+  menuId          String
+  menu            Menu     @relation(fields: [menuId], references: [id])
+  role            UserRole
+  
+  // Permissions (5 types)
+  canView         Boolean  @default(false)
+  canCreate       Boolean  @default(false)
+  canEdit         Boolean  @default(false)
+  canDelete       Boolean  @default(false)
+  canExport       Boolean  @default(false)
+  
+  @@unique([menuId, role])
+  @@index([menuId])
+  @@index([role])
+}
+
+model MenuPermission {
+  id              String   @id @default(cuid())
+  userId          String
+  user            User     @relation(fields: [userId], references: [id])
+  menuId          String
+  menu            Menu     @relation(fields: [menuId], references: [id])
+  
+  // Override permissions
+  canView         Boolean  @default(false)
+  canCreate       Boolean  @default(false)
+  canEdit         Boolean  @default(false)
+  canDelete       Boolean  @default(false)
+  canExport       Boolean  @default(false)
+  
+  grantedBy       String?  // Which admin granted this
+  grantedAt       DateTime @default(now())
+  
+  @@unique([userId, menuId])
+  @@index([userId])
+  @@index([menuId])
+}
+
+// ============================================
+// AUDIT LOG
+// ============================================
+
+model AuditLog {
+  id              String   @id @default(cuid())
+
+  userId          String?
+  action          String   // CREATE, UPDATE, DELETE
+  entity          String   // Bill, Payment, Unit, etc.
+  entityId        String
+
+  oldValues       String?  @db.Text // JSON
+  newValues       String?  @db.Text // JSON
+
+  ipAddress       String?
+  userAgent       String?
+
+  createdAt       DateTime @default(now())
+
+  @@index([userId])
+  @@index([entity])
+  @@index([createdAt])
+}
+
+// ============================================
+// BETTER AUTH MODELS
+// ============================================
+
+model Session {
+  id                String    @id @default(cuid())
+  userId            String
+  expiresAt         DateTime
+  token             String    @unique
+  ipAddress         String?
+  userAgent         String?
+
+  // For organization plugin - active tenant context
+  activeOrganizationId String?
+
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  user              User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model Account {
+  id                    String    @id @default(cuid())
+  userId                String
+  accountId             String    // Email for credentials, provider ID for OAuth
+  providerId            String    // "credential", "google", etc.
+
+  accessToken           String?   @db.Text
+  refreshToken          String?   @db.Text
+  idToken               String?   @db.Text
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  password              String?   // For credentials provider
+
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([providerId, accountId])
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String   // Email or phone
+  value      String   // Verification code/token
+  expiresAt  DateTime
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([identifier, value])
+  @@index([identifier])
+}
+
+model Organization {
+  id         String   @id @default(cuid())
+  name       String
+  slug       String?  @unique
+  logo       String?
+
+  // Additional fields to match your Tenant model
+  address    String?
+  phone      String?
+  email      String?
+  isActive   Boolean  @default(true)
+
+  // Creator
+  createdBy  String
+
+  // Relations
+  members    Member[]
+  invitations Invitation[]
+
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([slug])
+  @@index([createdBy])
+}
+
+model Member {
+  id              String       @id @default(cuid())
+  organizationId  String
+  userId          String
+  role            String       // Maps to UserRole enum
+
+  // Permissions
+  permissions     String?      @db.Text // JSON array of permissions
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user            User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([organizationId])
+  @@index([userId])
+}
+
+model Invitation {
+  id              String       @id @default(cuid())
+  organizationId  String
+  email           String
+  role            String?      // Role to assign when invitation is accepted
+  status          String       @default("pending") // "pending", "accepted", "expired"
+  expiresAt       DateTime
+  inviterId       String
+
+  createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
+
+  organization    Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, email])
+  @@index([email])
+  @@index([organizationId])
+}
+
+// ============================================
+// SOA ARCHIVE (Statement of Account History)
+// ============================================
+
+model SOABatch {
+  id              String   @id @default(cuid())
+  tenantId        String
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+
+  // Batch identification
+  batchNumber     String   @unique // Auto-generated: SOA-2025-12-001
+  asOfDate        DateTime          // The "as of" date for this batch
+  billingMonth    DateTime?         // Optional: specific billing month
+
+  // Filter used for generation
+  filterType      String   @default("ALL") // ALL, FLOOR, UNIT
+  filterValue     String?                   // Floor level or unit ID
+
+  // Status
+  status          SOABatchStatus @default(GENERATED)
+  distributedAt   DateTime?
+  distributedBy   String?
+
+  // Stats
+  totalUnits      Int      @default(0)
+  totalAmount     Decimal  @default(0) @db.Decimal(12, 2)
+  totalBalance    Decimal  @default(0) @db.Decimal(12, 2)
+
+  // Relations
+  documents       SOADocument[]
+
+  // Metadata
+  generatedBy     String
+  remarks         String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([tenantId])
+  @@index([billingMonth])
+  @@index([status])
+  @@index([createdAt])
+}
+
+enum SOABatchStatus {
+  GENERATED   // Just created
+  REVIEWED    // Reviewed but not sent
+  DISTRIBUTED // Sent to unit owners, bills locked
+  CANCELLED   // Cancelled/voided
+}
+
+model SOADocument {
+  id              String   @id @default(cuid())
+  batchId         String
+  batch           SOABatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  unitId          String
+  unit            Unit     @relation(fields: [unitId], references: [id])
+
+  // Snapshot of unit/owner info at generation time
+  unitNumber      String
+  ownerName       String
+  floorLevel      String
+
+  // Summary at generation time
+  totalBilled     Decimal  @db.Decimal(12, 2)
+  totalPaid       Decimal  @db.Decimal(12, 2)
+  currentBalance  Decimal  @db.Decimal(12, 2)
+
+  // Aging breakdown at generation time
+  current         Decimal  @default(0) @db.Decimal(12, 2) // 0-30 days
+  days31to60      Decimal  @default(0) @db.Decimal(12, 2)
+  days61to90      Decimal  @default(0) @db.Decimal(12, 2)
+  over90days      Decimal  @default(0) @db.Decimal(12, 2)
+
+  // Full SOA data snapshot (JSON)
+  soaData         String   @db.Text // JSON with full bill details
+
+  // Related bills at time of generation
+  bills           Bill[]
+
+  createdAt       DateTime @default(now())
+
+  @@index([batchId])
+  @@index([unitId])
+}
